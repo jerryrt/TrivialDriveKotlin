@@ -25,20 +25,8 @@ import android.util.Log
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleObserver
 import androidx.lifecycle.OnLifecycleEvent
-import com.android.billingclient.api.AcknowledgePurchaseParams
-import com.android.billingclient.api.BillingClient
-import com.android.billingclient.api.BillingClientStateListener
-import com.android.billingclient.api.BillingFlowParams
-import com.android.billingclient.api.BillingResult
-import com.android.billingclient.api.ConsumeParams
-import com.android.billingclient.api.Purchase
-import com.android.billingclient.api.PurchasesUpdatedListener
-import com.android.billingclient.api.SkuDetails
-import com.android.billingclient.api.SkuDetailsParams
-import com.android.billingclient.api.acknowledgePurchase
-import com.android.billingclient.api.consumePurchase
-import com.android.billingclient.api.queryPurchasesAsync
-import com.android.billingclient.api.querySkuDetails
+import com.android.billingclient.api.*
+import com.android.billingclient.api.BillingClient.ProductType
 import com.sample.android.trivialdrivesample.MakePurchaseViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
@@ -125,7 +113,7 @@ class BillingDataSource private constructor(
 
     // Flows that are mostly maintained so they can be transformed into observables.
     private val skuStateMap: MutableMap<String, MutableStateFlow<SkuState>> = HashMap()
-    private val skuDetailsMap: MutableMap<String, MutableStateFlow<SkuDetails?>> = HashMap()
+    private val skuDetailsMap: MutableMap<String, MutableStateFlow<ProductDetails?>> = HashMap()
 
     // Observables that are used to communicate state.
     private val purchaseConsumptionInProcess: MutableSet<Purchase> = HashSet()
@@ -182,7 +170,7 @@ class BillingDataSource private constructor(
     private fun addSkuFlows(skuList: List<String>?) {
         for (sku in skuList!!) {
             val skuState = MutableStateFlow(SkuState.SKU_STATE_UNPURCHASED)
-            val details = MutableStateFlow<SkuDetails?>(null)
+            val details = MutableStateFlow<ProductDetails?>(null)
             details.subscriptionCount.map { count -> count > 0 } // map count into active/inactive flag
                 .distinctUntilChanged() // only react to true<->false changes
                 .onEach { isActive -> // configure an action
@@ -261,7 +249,7 @@ class BillingDataSource private constructor(
     fun getSkuPrice(sku: String): Flow<String> {
         val skuDetailsFlow = skuDetailsMap[sku]!!
         return skuDetailsFlow.mapNotNull { skuDetails ->
-            skuDetails?.price
+            skuDetails?.oneTimePurchaseOfferDetails?.formattedPrice
         }
     }
 
@@ -278,12 +266,12 @@ class BillingDataSource private constructor(
      * Store the SkuDetails and post them in the [.skuDetailsMap]. This allows other
      * parts of the app to use the [SkuDetails] to show SKU information and make purchases.
      */
-    private fun onSkuDetailsResponse(billingResult: BillingResult, skuDetailsList: List<SkuDetails>?) {
+    private fun onSkuDetailsResponse(billingResult: BillingResult, skuDetailsList: List<ProductDetails>?) {
         val responseCode = billingResult.responseCode
         val debugMessage = billingResult.debugMessage
+        Log.i(TAG, "onSkuDetailsResponse: $responseCode $debugMessage")
         when (responseCode) {
             BillingClient.BillingResponseCode.OK -> {
-                Log.i(TAG, "onSkuDetailsResponse: $responseCode $debugMessage")
                 if (skuDetailsList == null || skuDetailsList.isEmpty()) {
                     Log.e(
                             TAG,
@@ -294,7 +282,7 @@ class BillingDataSource private constructor(
                     )
                 } else {
                     for (skuDetails in skuDetailsList) {
-                        val sku = skuDetails.sku
+                        val sku = skuDetails.productId
                         val detailsMutableFlow = skuDetailsMap[sku]
                         detailsMutableFlow?.tryEmit(skuDetails)
                                 ?: Log.e(TAG, "Unknown sku: $sku")
@@ -330,22 +318,30 @@ class BillingDataSource private constructor(
      */
     private suspend fun querySkuDetailsAsync() {
         if (!knownInappSKUs.isNullOrEmpty()) {
-            val skuDetailsResult = billingClient.querySkuDetails(
-                    SkuDetailsParams.newBuilder()
-                            .setType(BillingClient.SkuType.INAPP)
-                            .setSkusList(knownInappSKUs)
-                            .build()
-            )
-            onSkuDetailsResponse(skuDetailsResult.billingResult, skuDetailsResult.skuDetailsList)
+            var params = mutableListOf<QueryProductDetailsParams.Product>()
+            knownInappSKUs.forEach {
+                val p = QueryProductDetailsParams.Product.newBuilder()
+                    .setProductId(it)
+                    .setProductType(ProductType.INAPP)
+                    .build()
+                params.add(p)
+            }
+            val skuDetailsResult = billingClient.queryProductDetails(QueryProductDetailsParams.newBuilder().setProductList(params).build())
+
+            onSkuDetailsResponse(skuDetailsResult.billingResult, skuDetailsResult.productDetailsList)
         }
         if (!knownSubscriptionSKUs.isNullOrEmpty()) {
-            val skuDetailsResult = billingClient.querySkuDetails(
-                    SkuDetailsParams.newBuilder()
-                            .setType(BillingClient.SkuType.SUBS)
-                            .setSkusList(knownSubscriptionSKUs)
-                            .build()
-            )
-            onSkuDetailsResponse(skuDetailsResult.billingResult, skuDetailsResult.skuDetailsList)
+            var params = mutableListOf<QueryProductDetailsParams.Product>()
+            knownSubscriptionSKUs.forEach {
+                val p = QueryProductDetailsParams.Product.newBuilder()
+                    .setProductId(it)
+                    .setProductType(ProductType.SUBS)
+                    .build()
+                params.add(p)
+            }
+            val skuDetailsResult = billingClient.queryProductDetails(QueryProductDetailsParams.newBuilder().setProductList(params).build())
+
+            onSkuDetailsResponse(skuDetailsResult.billingResult, skuDetailsResult.productDetailsList)
         }
     }
 
